@@ -32,18 +32,49 @@ pub fn print_results_of_check_disk_health() -> windows::core::Result<()>  {
         println!("{}", "\n=== Storage Device Information ===\n".bright_cyan().bold());
 
         // 1. Query StorageDeviceProperty (Device Info)
-        query_device_property(handle)?;
+        check_query_function_support(
+            query_device_property(handle),
+            "⚠ Device Property not supported on this drive",
+        );
 
         // 2. Query StorageAdapterProperty (Controller Info)
-        query_adapter_property(handle)?;
+        check_query_function_support(
+            query_adapter_property(handle),
+            "⚠ Adapter Property not supported on this drive",
+        );
 
         // 3. Query StorageDeviceIdProperty (Device ID)
-        query_device_id_property(handle)?;
+        check_query_function_support(
+            query_device_id_property(handle),
+            "⚠ Device ID Property not supported on this drive",
+        );
+
+        // 4. (Optional) Query Physical Element Status (Health Monitoring)
+        // This may not be supported on all drives/systems
+        check_query_function_support(
+            query_physical_element_status(handle),
+            "⚠ Physical Element Status not supported on this drive",
+        );
 
         let _ = CloseHandle(handle);
     }
     Ok(())
 }
+
+
+fn check_query_function_support(query_function: windows::core::Result<()>,  message_error: &str) {
+    // This function can be used to check if a query function is supported
+    // Currently not implemented
+
+    match query_function {
+        Ok(_) => {},
+        Err(_e) => {
+            println!("{}", message_error.bright_yellow());
+            println!("{}", format!("  (This is normal for some drives)").dimmed());
+        }
+    }
+}
+
 
 // Query basic device information (model, vendor, type, etc.)
 unsafe fn query_device_property(handle: HANDLE) -> windows::core::Result<()> {
@@ -186,6 +217,7 @@ fn get_string_from_offset(buffer: &[u8], offset: usize) -> String {
     String::from_utf8_lossy(&slice[..end]).trim().to_string()
 }
 
+// Function for STORAGE_PROPERTY_QUERY (Device/Adapter/ID properties)
 unsafe fn call_ioctl_storage_query_property(
         handle: HANDLE,
         query: &STORAGE_PROPERTY_QUERY,
@@ -196,16 +228,76 @@ unsafe fn call_ioctl_storage_query_property(
         unsafe {
             DeviceIoControl(
                 handle,
-                IOCTL_STORAGE_QUERY_PROPERTY,
+                IOCTL_STORAGE_QUERY_PROPERTY,  // This IOCTL
                 Some(query as *const _ as *const _),
                 mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
                 Some(output.as_mut_ptr() as *mut _),
                 output.len() as u32,
                 Some(&mut bytes_returned),
                 None,
-            )?;  // Use ? to propagate errors
+            )?;
         }
 
         let data = output[..bytes_returned as usize].to_vec();
         Ok(data)
     }
+
+// Separate function for PHYSICAL_ELEMENT_STATUS (Health monitoring)
+unsafe fn call_ioctl_physical_element_status(
+        handle: HANDLE,
+        request: &PHYSICAL_ELEMENT_STATUS_REQUEST,
+    ) -> windows::core::Result<Vec<u8>> {
+        let mut output = [0u8; 4096];
+        let mut bytes_returned: u32 = 0;
+        
+        unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_STORAGE_GET_PHYSICAL_ELEMENT_STATUS,  // Different IOCTL!
+                Some(request as *const _ as *const _),
+                mem::size_of::<PHYSICAL_ELEMENT_STATUS_REQUEST>() as u32,
+                Some(output.as_mut_ptr() as *mut _),
+                output.len() as u32,
+                Some(&mut bytes_returned),
+                None,
+            )?;
+        }
+
+        let data = output[..bytes_returned as usize].to_vec();
+        Ok(data)
+    }
+
+//using the IOCTL_STORAGE_GET_PHYSICAL_ELEMENT_STATUS to get the physical status of the disk
+// This function is not used currently but can be implemented for more detailed health checks
+unsafe fn query_physical_element_status(handle: HANDLE) -> windows::core::Result<()> {
+    let request = PHYSICAL_ELEMENT_STATUS_REQUEST {
+        Version: std::mem::size_of::<PHYSICAL_ELEMENT_STATUS_REQUEST>() as u32,
+        Size: std::mem::size_of::<PHYSICAL_ELEMENT_STATUS_REQUEST>() as u32,
+        StartingElement: 0,  // Start from first element
+        Filter: 0,           // 0 = all elements, 1 = only restored elements
+        ReportType: 0,       // 0 = physical element status
+        Reserved: [0u8; 2],
+    };
+    
+    // Use the dedicated function for physical element status
+    let output = unsafe { call_ioctl_physical_element_status(handle, &request)? };
+    
+    // Parse the output
+    let descriptor = unsafe { &*(output.as_ptr() as *const PHYSICAL_ELEMENT_STATUS_DESCRIPTOR) };
+    
+    println!("{}", "► Physical Element Status:".bright_yellow());
+    println!("  Version: {}", descriptor.Version);
+    println!("  Size: {}", descriptor.Size);
+    println!("  Number of Elements: {}", descriptor.ElementIdentifier);
+    // println!("  Health Type: {}", descriptor.PhysicalElementType);
+    println!("  Health Status: ");
+    match descriptor.PhysicalElementHealth {
+        0 => println!("    Healthy"),
+        1 => println!("    Warning"),
+        2 => println!("    Critical"),
+        _ => println!("    Unknown ({})", descriptor.PhysicalElementHealth),
+    }
+
+    Ok(())
+}
+
